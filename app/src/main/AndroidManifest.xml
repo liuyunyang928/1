@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Package visibility (Android 11+): we only need to see launchable apps (for the app list)
+      and the LSPosed manager (to show whether the module host is installed).
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <package android:name="org.lsposed.manager" />
+    </queries>
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.NoShake">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          Fallback configuration share channel: hooked processes (a different UID) read the block
+          list through this read-only provider when XSharedPreferences is unavailable.
+          The provider exposes no sensitive data and rejects every write operation.
+        -->
+        <provider
+            android:name=".core.ConfigProvider"
+            android:authorities="io.github.liuyunyang928.noshake.config"
+            android:enabled="true"
+            android:exported="true"
+            android:grantUriPermissions="false" />
+
+        <!-- Legacy Xposed / LSPosed module metadata -->
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="@string/xposed_description" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="82" />
+        <!-- Enable LSPosed's XSharedPreferences bridge so hooked processes can read our prefs. -->
+        <meta-data
+            android:name="xposedsharedprefs"
+            android:value="true" />
+    </application>
+
+</manifest>

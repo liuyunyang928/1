@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.NoShake" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- Keep the default Material 3 system bar handling: it automatically switches the
+             status bar icon colour for light/dark mode. -->
+    </style>
+</resources>

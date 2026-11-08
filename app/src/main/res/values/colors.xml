@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#0B57D0</color>
+
+    <!-- UI 语义色（浅色模式）。深色模式在 values-night/colors.xml 中覆盖。 -->
+    <!-- 警示色：未检测到 LSPosed 的提示文字与图标 -->
+    <color name="noshake_warning">#B3261E</color>
+    <!-- 正常状态色：已检测到 LSPosed 的状态图标 -->
+    <color name="noshake_ok">#0B57D0</color>
+    <!-- 次要文字色：包名、说明文字等 -->
+    <color name="noshake_text_secondary">#49454F</color>
+</resources>

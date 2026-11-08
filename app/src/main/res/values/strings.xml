@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">摇一摇克星</string>
+    <string name="xposed_description">拦截指定应用的加速度计 / 陀螺仪等动作传感器数据，从源头阻止「摇一摇」跳转广告</string>
+
+    <!-- 顶栏菜单 -->
+    <string name="menu_instructions">使用说明</string>
+    <string name="menu_github">GitHub 仓库</string>
+    <string name="menu_about">关于</string>
+
+    <!-- 状态卡片 -->
+    <string name="status_enable_title">启用拦截</string>
+    <string name="status_enabled_summary">已启用 %1$d 个应用</string>
+    <string name="status_strict_mode_title">严格模式（实验性）</string>
+    <string name="status_strict_mode_desc">同时让应用认为动作传感器不存在。个别未做空判断的应用可能崩溃，遇到异常请关闭。</string>
+    <string name="lsposed_missing">未检测到 LSPosed，模块无法生效</string>
+    <string name="lsposed_installed">已检测到 LSPosed。请启用本模块，并在作用域中勾选要拦截的应用。</string>
+    <string name="action_open_lsposed">打开 LSPosed</string>
+
+    <!-- 搜索与筛选 -->
+    <string name="search_hint">搜索应用名或包名</string>
+    <string name="filter_all">全部</string>
+    <string name="filter_enabled">已启用</string>
+
+    <!-- 列表状态 -->
+    <string name="state_loading">正在加载应用…</string>
+    <string name="state_empty_no_apps">没有找到可管理的应用</string>
+    <string name="state_empty_filtered">没有符合条件的应用\n试试更换关键词或筛选条件</string>
+    <string name="state_load_failed">应用列表加载失败，请重试</string>
+
+    <!-- 通用操作与提示 -->
+    <string name="action_got_it">知道了</string>
+    <string name="action_close">关闭</string>
+    <string name="action_open_github">打开 GitHub</string>
+    <string name="lsposed_open_failed">无法打开 LSPosed，请确认已安装 LSPosed 管理器</string>
+    <string name="link_open_failed">无法打开链接，请稍后重试</string>
+
+    <!-- 使用说明对话框 -->
+    <string name="instructions_title">使用说明</string>
+    <string name="instructions_message">1. 安装 LSPosed\n需要设备已获取 root 权限（Magisk 或 KernelSU），并安装 LSPosed 框架。\n\n2. 启用模块\n打开 LSPosed 管理器 →「模块」→ 找到「摇一摇克星」并启用。\n\n3. 选择作用域\n在 LSPosed 管理器中进入本模块 →「作用域」→ 勾选要拦截的应用。\n\n4. 开启拦截\n回到本应用，打开「启用拦截」总开关，并在下方列表里为目标应用打开开关。\n\n5. 强制停止并重启目标应用\n在系统设置中强制停止目标应用，再重新打开，配置即会生效。\n\n6. 生效时间\n配置修改后最多 30 秒内生效，无需重启设备。\n\n注意事项：\n• 只拦截加速度计、陀螺仪等动作传感器，不影响光线、距离等传感器。\n• 极少数通过 NDK 直接读取传感器数据的应用可能不受影响。\n• 本应用不收集、不上传任何数据。</string>
+
+    <!-- 关于对话框 -->
+    <string name="about_title">关于</string>
+    <string name="about_message">版本 %1$s\n\n「摇一摇克星」是一个 LSPosed 模块，按应用拦截加速度计 / 陀螺仪等动作传感器，从源头阻止「摇一摇」跳转广告。\n\n开源协议：MIT\nGitHub：%2$s\n\n隐私说明：本应用不收集、不上传任何个人信息与使用数据，所有配置仅保存在本机。</string>
+</resources>
