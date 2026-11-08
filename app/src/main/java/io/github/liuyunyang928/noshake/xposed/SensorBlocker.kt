@@ -22,12 +22,15 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   working, they simply believe that the sensor is unavailable.
  * - The deprecated `SensorListener` bit-mask API (two overloads) is covered as well, because
  *   it is an easy-to-miss bypass (`registerListener(SensorListener, int)`).
+ * - `createSensorDirectReport(...)` (API 26) is covered, otherwise a Java app could bypass
+ *   the listener API and read sensors through a `SensorDirectChannel`.
  * - Optional "strict mode" additionally hides these sensors from `getDefaultSensor()` and
  *   `getSensorList()`; disabled by default because some apps do not null-check the result.
  *
  * Only sensor *registration* is intercepted, no private/hidden framework field is touched, so
- * the hook stays stable across Android versions and ROM modifications are detected through the
- * installed-hook counter below.
+ * the hook stays stable across Android versions. OEMs sometimes override the public
+ * `registerListener` methods in their own `SystemSensorManager` subclass; those declarations are
+ * hooked too when the class is available.
  */
 internal object SensorBlocker {
 
@@ -44,23 +47,47 @@ internal object SensorBlocker {
         // SensorEventListener API: every overload takes the Sensor as the second argument.
         val sensorHook = object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
-                val sensor = param.args?.getOrNull(1) as? Sensor ?: return
-                if (sensor.type !in Contract.MOTION_SENSOR_TYPES) return
-                if (!ModuleConfig.shouldBlock(packageName)) return
-                param.setResult(false)
-                logBlockedOnce(packageName)
+                try {
+                    val sensor = param.args?.getOrNull(1) as? Sensor ?: return
+                    if (sensor.type !in Contract.MOTION_SENSOR_TYPES) return
+                    if (!ModuleConfig.shouldBlock(packageName)) return
+                    param.setResult(false)
+                    logBlockedOnce(packageName)
+                } catch (t: Throwable) {
+                    XposedBridge.log("NoShake: sensor hook failed: $t")
+                }
             }
         }
 
         // Deprecated SensorListener API: the second argument is a bit-mask of SENSOR_* values.
         val legacyHook = object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
-                if (param.args?.getOrNull(0) !is SensorListener) return
-                val mask = param.args?.getOrNull(1) as? Int ?: return
-                if (mask and LEGACY_MOTION_MASK == 0) return
-                if (!ModuleConfig.shouldBlock(packageName)) return
-                param.setResult(false)
-                logBlockedOnce(packageName)
+                try {
+                    if (param.args?.getOrNull(0) !is SensorListener) return
+                    val mask = param.args?.getOrNull(1) as? Int ?: return
+                    if (mask and LEGACY_MOTION_MASK == 0) return
+                    if (!ModuleConfig.shouldBlock(packageName)) return
+                    param.setResult(false)
+                    logBlockedOnce(packageName)
+                } catch (t: Throwable) {
+                    XposedBridge.log("NoShake: legacy sensor hook failed: $t")
+                }
+            }
+        }
+
+        // createSensorDirectReport(Sensor, int rateLevel, int reportToken): the Sensor is the
+        // first argument here, unlike in registerListener().
+        val directReportHook = object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                try {
+                    val sensor = param.args?.getOrNull(0) as? Sensor ?: return
+                    if (sensor.type !in Contract.MOTION_SENSOR_TYPES) return
+                    if (!ModuleConfig.shouldBlock(packageName)) return
+                    param.setResult(null)
+                    logBlockedOnce(packageName)
+                } catch (t: Throwable) {
+                    XposedBridge.log("NoShake: direct report hook failed: $t")
+                }
             }
         }
 
@@ -68,20 +95,33 @@ internal object SensorBlocker {
         hooked += hookSafely(sensorManagerClass, "registerListener", sensorHook)
         hooked += hookSafely(sensorManagerClass, "registerListener", legacyHook)
         hooked += hookSafely(sensorManagerClass, "requestTriggerSensor", sensorHook)
+        hooked += hookSafely(sensorManagerClass, "createSensorDirectReport", directReportHook)
+
+        // OEMs may override the public registration methods in their SystemSensorManager
+        // subclass, in which case a virtual call would bypass the hooks above.
+        hooked += hookSubclassOverrides(lpparam, sensorHook, legacyHook)
 
         // Strict mode (off by default): pretend the motion sensors do not exist at all.
         val defaultSensorHook = object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
-                if (!ModuleConfig.isStrictMode(packageName)) return
-                val type = param.args?.getOrNull(0) as? Int ?: return
-                if (type in Contract.MOTION_SENSOR_TYPES) param.setResult(null)
+                try {
+                    if (!ModuleConfig.isStrictMode(packageName)) return
+                    val type = param.args?.getOrNull(0) as? Int ?: return
+                    if (type in Contract.MOTION_SENSOR_TYPES) param.setResult(null)
+                } catch (t: Throwable) {
+                    XposedBridge.log("NoShake: strict mode hook failed: $t")
+                }
             }
         }
         val sensorListHook = object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
-                if (!ModuleConfig.isStrictMode(packageName)) return
-                val sensors = param.getResult() as? List<Sensor> ?: return
-                param.setResult(sensors.filterNot { it.type in Contract.MOTION_SENSOR_TYPES })
+                try {
+                    if (!ModuleConfig.isStrictMode(packageName)) return
+                    val sensors = param.getResult() as? List<Sensor> ?: return
+                    param.setResult(sensors.filterNot { it.type in Contract.MOTION_SENSOR_TYPES })
+                } catch (t: Throwable) {
+                    XposedBridge.log("NoShake: sensor list hook failed: $t")
+                }
             }
         }
         hooked += hookSafely(sensorManagerClass, "getDefaultSensor", defaultSensorHook)
@@ -92,6 +132,28 @@ internal object SensorBlocker {
         // would otherwise fail silently. The line is visible in the LSPosed log.
         if (hooked == 0) {
             XposedBridge.log("NoShake: WARNING no SensorManager method could be hooked in $packageName")
+        }
+    }
+
+    private fun hookSubclassOverrides(
+        lpparam: XC_LoadPackage.LoadPackageParam,
+        sensorHook: XC_MethodHook,
+        legacyHook: XC_MethodHook,
+    ): Int {
+        return try {
+            val systemSensorManager = Class.forName(
+                "android.hardware.SystemSensorManager",
+                false,
+                lpparam.classLoader,
+            )
+            var count = 0
+            count += hookSafely(systemSensorManager, "registerListener", sensorHook)
+            count += hookSafely(systemSensorManager, "registerListener", legacyHook)
+            count += hookSafely(systemSensorManager, "requestTriggerSensor", sensorHook)
+            count
+        } catch (t: Throwable) {
+            // Expected on most ROMs (the class simply does not override these methods).
+            0
         }
     }
 

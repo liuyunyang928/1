@@ -27,9 +27,13 @@ class ConfigProvider : ContentProvider() {
         sortOrder: String?,
     ): Cursor {
         val ctx = context ?: throw IllegalStateException("ConfigProvider is not attached")
-        val store = ConfigStore(ctx)
-
         val cursor = MatrixCursor(COLUMNS)
+        // Only the exact configuration URI is served; other paths get an empty result.
+        if (uri.path != Contract.CONFIG_PATH) {
+            return cursor
+        }
+
+        val store = ConfigStore(ctx)
         cursor.addRow(
             arrayOf(
                 if (store.masterEnabled) 1 else 0,

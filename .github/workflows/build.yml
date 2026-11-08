@@ -28,6 +28,14 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # Keep one debug keystore across workflow runs. Otherwise every run would sign the APK
+      # with a fresh key and users could not update an installed build without uninstalling it.
+      - name: Cache debug keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: noshake-debug-keystore-v1
+
       # The ubuntu-latest image already ships a working Android SDK (ANDROID_HOME) with
       # sdkmanager. Using it directly avoids the deprecated "tools" package that
       # android-actions/setup-android tries to install on newer SDK layouts.

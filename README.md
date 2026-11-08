@@ -34,14 +34,14 @@
 ## 特性
 
 - **按应用拦截**：只对 LSPosed 作用域内、且在管理界面中被勾选的应用生效，其他应用不受影响。
-- **从数据源头拦截**：在目标应用进程内 hook `SensorManager.registerListener(...)`（4 个 `SensorEventListener` 重载 + 2 个已废弃的 `SensorListener` 位掩码重载）与 `requestTriggerSensor(...)`，命中动作传感器时直接返回 `false`。广告 SDK 连传感器都注册不上，收不到任何一次事件，自然无法判断「摇一摇」。
+- **从数据源头拦截**：在目标应用进程内 hook `SensorManager.registerListener(...)`（4 个 `SensorEventListener` 重载 + 2 个已废弃的 `SensorListener` 位掩码重载）、`requestTriggerSensor(...)`、`createSensorDirectReport(...)`（`SensorDirectChannel` 直连通道），并反射 hook OEM `SystemSensorManager` 子类中覆写的注册方法。命中拦截集合的动作传感器时直接拒绝注册/直连（`requestTriggerSensor` 因拦截集合不含显著运动而通常放行），广告 SDK 收不到任何一次事件，自然无法判断「摇一摇」。
 - **最小拦截集合**：只拦与动作/方向直接相关的 9 种传感器（加速度计、陀螺仪、重力、线性加速度、旋转矢量、游戏旋转矢量、未校准陀螺仪、地磁旋转矢量、未校准加速度计），不拦光线、距离、磁力、显著运动、计步等，避免「自动亮度失效 / 通话时无法贴耳熄屏 / 计步归零」这类副作用。
 - **可选的严格模式（实验性）**：额外让 `getDefaultSensor()` 返回 `null`、从 `getSensorList()` / `getDynamicSensorList()` 中隐藏动作传感器，默认关闭，可在管理界面开启；个别不做空判断的应用可能异常（见 [FAQ](#faq)）。
-- **不伪造数据、不碰私有 API**：只 hook 公开方法，不读取/修改框架私有字段与 `@hide` 类，跨 Android 版本更稳定。
-- **零权限、零联网**：App 未声明任何 `uses-permission`（包括网络权限），不收集、不上传任何数据。
+- **不伪造数据、不读取私有字段**：只拦截公开的传感器注册方法；OEM 子类覆写通过反射按方法名 hook，不读取/修改框架私有字段，跨 Android 版本更稳定。
+- **未申请任何用户可见权限（无网络权限）**：APK 没有 `INTERNET` 等用户可见权限，合并后只含 androidx 自动注入的签名级内部权限 `io.github.liuyunyang928.noshake.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`（用于安全注册动态广播，普通应用无法获得）。不收集、不上传任何数据。
 - **配置快速生效**：修改配置后最多 30 秒内对新的传感器注册生效；首次把应用纳入拦截时需强制停止目标应用（hook 只在进程启动时装载）。
-- **失败兜底（fail-closed）**：两条配置读取通道都不可用时按「已启用拦截」处理，避免拦截悄悄失效。
-- **可诊断**：hook 命中数为 0 时会在 LSPosed 日志输出 WARNING；首次拦截会输出 `NoShake: blocking motion sensors for <包名>`。
+- **配置不可读时不会误拦应用（fail-open）**：两条配置读取通道都读不到配置时，本进程不拦截任何应用，只在 LSPosed 日志输出 `NoShake: configuration unavailable, ...` 提示，避免把作用域内的无关应用一起拦住。
+- **可诊断**：hook 命中数为 0 时会在 LSPosed 日志输出 WARNING；首次拦截输出 `NoShake: blocking motion sensors for <包名>`；配置不可读时输出 `NoShake: configuration unavailable, ...`。
 - **开源可审计**：MIT 协议，纯 Kotlin + Material3 + ViewBinding，无第三方 UI 库；GitHub Actions 自动构建 Debug APK。
 
 ## 背景：为什么摇一摇广告拦不住
@@ -80,7 +80,7 @@ sequenceDiagram
     SDK->>SM: registerListener(加速度计)
     SM->>T: 调用进入模块 hook
     T->>T: shouldBlock(packageName)?
-    alt 进程内缓存已过期
+    alt 配置缓存已过期
         T->>CP: query(config URI)
         alt Provider 可用
             CP-->>T: 单行 [master, strict, blocked]
@@ -89,9 +89,15 @@ sequenceDiagram
         end
         Note over T: 配置在进程内缓存 30 秒
     end
-    T-->>SM: setResult(false)，跳过系统原实现
-    SM-->>SDK: 返回 false（注册失败）
-    Note over SDK: 永远收不到 onSensorChanged，无法识别摇一摇
+    alt 配置不可读（两条通道都失败）
+        T->>T: 日志 configuration unavailable，本进程不拦截任何应用（fail-open）
+    else 该应用已勾选且总开关开启
+        T-->>SM: setResult(false)，跳过系统原实现
+        SM-->>SDK: 返回 false（注册失败）
+        Note over SDK: 收不到 onSensorChanged，无法识别摇一摇
+    else 未勾选 / 总开关关闭
+        T-->>SM: 放行，执行系统原实现
+    end
 ```
 
 ### Hook 决策流程
@@ -103,12 +109,15 @@ flowchart TD
     C -- "是" --> Z["跳过，不安装 hook"]
     C -- "否" --> D["SensorBlocker.install()"]
     D --> E["hook registerListener 全部重载（含已废弃 SensorListener 位掩码）"]
-    D --> F["hook requestTriggerSensor"]
+    D --> F["hook requestTriggerSensor（显著运动不在拦截集合，通常放行）"]
+    D --> M["hook createSensorDirectReport（SensorDirectChannel 直连）"]
+    D --> N["反射 hook OEM SystemSensorManager 子类覆写的注册方法"]
     D --> G["严格模式：hook getDefaultSensor / getSensorList / getDynamicSensorList"]
-    E --> H{"类型属于动作传感器<br/>且该应用已启用？"}
+    E --> H{"类型命中拦截集合<br/>且配置可读、应用已勾选？"}
     F --> H
-    H -- "否" --> I["放行，执行系统原实现"]
-    H -- "是" --> J["返回 false：注册被拒绝"]
+    M --> H
+    H -- "否" --> I["放行，执行系统原实现（配置不可读时 fail-open，不拦截）"]
+    H -- "是" --> J["拒绝注册；createSensorDirectReport 返回 null"]
     G --> K["返回 null 或从列表中过滤"]
     D --> L["hook 命中数为 0 时输出 LSPosed 日志 WARNING"]
 ```
@@ -120,8 +129,10 @@ flowchart TD
 - **被拦截的方法**（`hookAllMethods`，覆盖所有重载）：
   - `SensorManager.registerListener(SensorEventListener, Sensor, ...)`：第二个参数是 `Sensor`，其类型命中拦截集且该应用已启用时，`setResult(false)` 并跳过系统实现；
   - `SensorManager.registerListener(SensorListener, int[, int])`（已废弃的位掩码 API）：掩码包含方向/加速度位时同样返回 `false`，堵住容易遗漏的绕过面；
-  - `SensorManager.requestTriggerSensor(TriggerEventListener, Sensor)`：按 `Sensor` 类型判定（当前拦截集合不含 `TYPE_SIGNIFICANT_MOTION`，该入口实际放行）；
+  - `SensorManager.createSensorDirectReport(Sensor, ...)`（API 26 的 `SensorDirectChannel` 直连通道）：`Sensor` 是第一个参数，命中拦截集合时返回 `null`，防止应用绕过监听 API 直接读传感器；
+  - `SensorManager.requestTriggerSensor(TriggerEventListener, Sensor)`：已 hook，但当前拦截集合不含 `TYPE_SIGNIFICANT_MOTION`(17)，因此该入口通常放行（保留计步/活动识别类功能）；
   - **严格模式**额外处理：`getDefaultSensor()` 返回 `null`；`getSensorList()`、`getDynamicSensorList()` 过滤掉动作传感器。
+- **OEM 魔改防护**：部分 ROM 会在 `SystemSensorManager` 子类中覆写公开的注册方法，虚调用会绕过对 `SensorManager` 的 hook；模块会反射定位该类并尝试 hook 这些覆写声明（类不存在或未覆写时静默跳过，不影响正常使用）。
 - **拦截的 9 种传感器类型**（`core/Contract.kt` 中的 `MOTION_SENSOR_TYPES`）：
 
   | 值 | 常量 | 说明 |
@@ -137,7 +148,7 @@ flowchart TD
   | 35 | `TYPE_ACCELEROMETER_UNCALIBRATED` | 未校准加速度计 |
 
   **不拦截**：光线（5）、距离（8）、磁力（2/14）、显著运动（17）、计步（18/19）、心率（21/31）、气压/温度/湿度、铰链角（36）、佩戴检测（34）等，因此系统自动亮度、通话息屏、系统级计步/活动识别、折叠屏形态等功能不受影响（详见 [已知限制](#已知限制)）。
-- **诊断**：`installed-hook` 计数为 0 时输出 `NoShake: WARNING no SensorManager method could be hooked in <包名>`（用于发现 ROM 改名/魔改 `SensorManager` 的情况）；首次拦截输出 `NoShake: blocking motion sensors for <包名>`。
+- **诊断**：hook 命中计数为 0 时输出 `NoShake: WARNING no SensorManager method could be hooked in <包名>`（用于发现 ROM 改名/魔改 `SensorManager` 的情况，OEM 子类覆写也会额外 hook）；首次拦截输出 `NoShake: blocking motion sensors for <包名>`；配置不可读时输出 `NoShake: configuration unavailable, motion sensors will NOT be blocked in this process ...`。
 
 ### 配置读取链路
 
@@ -149,7 +160,7 @@ flowchart TD
    - URI：`content://io.github.liuyunyang928.noshake.config/config`
    - 单行游标三列：`[master, strict, blocked]`，其中 `blocked` 是以逗号分隔的包名列表（包名不含逗号，分隔安全）。
 3. **兜底通道**：Provider 不可用时回退到 `XSharedPreferences`（`Manifest` 中 `xposedsharedprefs=true` 启用 LSPosed 的桥接）。
-4. **双双失败时 fail-closed**：按「已启用拦截」处理（应用既然被用户放进 LSPosed 作用域，拦截就是预期行为）。
+4. **两条通道都失败时 fail-open**：无法确认用户是否真的勾选了该应用（LSPosed 作用域可能大于勾选列表），因此**不拦截任何应用**，只在 LSPosed 日志输出 `NoShake: configuration unavailable, ...` 提示（常见原因：本 App 被强制停止、被卸载或配置读取失败）。
 
 配置在目标进程内缓存 **30 秒**，因此修改配置后最多 30 秒内对**新的**传感器注册生效；已经建立的监听不会断开，需要重启/强制停止目标应用。
 
@@ -205,7 +216,13 @@ LSPosed 管理器 →「模块」→「摇一摇克星」→「作用域」→ �
 
 - 正常情况：目标应用摇一摇不再跳转；
 - 排障：打开 LSPosed 管理器 →「日志」，若看到 `NoShake: blocking motion sensors for <包名>`，说明 hook 已生效（每个进程只记录一次，用于减少日志噪音）；
-- 若看到 `NoShake: WARNING no SensorManager method could be hooked in <包名>`，说明该 ROM 改动了 `SensorManager`，模块无法安装 hook。
+- 若看到 `NoShake: WARNING no SensorManager method could be hooked in <包名>`，说明该 ROM 改动了 `SensorManager`，模块无法安装 hook；
+- 若看到 `NoShake: configuration unavailable`，说明配置读取失败（常见于本 App 被强制停止/未安装），此时模块按 fail-open **不会拦截任何应用**，请重新打开本 App 并确认安装状态。
+
+### 9. APK 签名与覆盖升级
+
+- 同一来源的 APK 可以直接覆盖升级；CI 构建通过 `actions/cache` 固定 debug keystore，因此**不同 CI 运行产出的 APK 之间可以覆盖安装**；
+- 但 CI 构建与你在本地用 Android Studio / `./gradlew assembleDebug` 构建的 APK 使用的是不同的 debug keystore，**签名不同，不能直接覆盖安装**——从本地构建切换到 CI 构建（或反之）前，请先卸载旧版本再安装（卸载会清除本 App 的本地配置）。
 
 ## 配置与生效说明
 
@@ -219,6 +236,8 @@ LSPosed 管理器 →「模块」→「摇一摇克星」→「作用域」→ �
 
 有效判定：目标应用在 `blocked_packages` 中，且总开关开启，才会拦截；严格模式同样要求总开关开启。
 
+配置不可读时（两条通道都失败）**不会拦截任何应用**（fail-open），只在 LSPosed 日志提示；恢复可读后最多 30 秒内重新读取。
+
 ### 生效时机
 
 | 场景 | 生效时间 |
@@ -229,12 +248,13 @@ LSPosed 管理器 →「模块」→「摇一摇克星」→「作用域」→ �
 | 目标应用已有监听 | 不会断开；需强制停止/重启目标应用 |
 | 目标应用进程重启 | 启动时立即读取最新配置 |
 | 关闭总开关 | 同上：对新注册立即放行，已有监听需重启应用 |
+| 配置不可读（如本 App 被强制停止/未安装） | 本进程不拦截任何应用（fail-open），仅日志提示；恢复后最多 30 秒内重新读取 |
 
 > 经验做法：勾选或取消应用后，顺手在系统设置里强制停止目标应用，避免等待缓存过期。
 
 ## 管理界面
 
-管理界面是一个轻量 Material3 页面（单 Activity + RecyclerView），不申请任何权限：
+管理界面是一个轻量 Material3 页面（单 Activity + RecyclerView），不申请任何用户可见权限（无网络权限）：
 
 - **顶栏菜单**：使用说明、GitHub 仓库、关于（版本号 / 开源协议 / 隐私说明）；
 - **状态卡片**：总开关、已启用应用数量、严格模式开关（标题「严格模式（实验性）」，副标题提示「同时让应用认为动作传感器不存在。个别未做空判断的应用可能崩溃，遇到异常请关闭。」）、LSPosed 是否安装（未安装时高亮提示），以及「打开 LSPosed」按钮；
@@ -259,6 +279,7 @@ LSPosed 管理器 →「模块」→「摇一摇克星」→「作用域」→ �
 8. 目标应用是否通过 NDK 或 WebView 读取传感器？Java 层 hook 对 NDK `ASensorManager` 和 WebView 的 `devicemotion`/`deviceorientation` 事件无效。
 9. 打开 LSPosed 日志：
    - 看到 `NoShake: blocking motion sensors for <包名>` → hook 已生效，问题可能出在覆盖范围（第 7、8 条）；
+   - 看到 `NoShake: configuration unavailable` → 配置读取失败（常见于本 App 被强制停止/未安装），此时按 fail-open 不会拦截任何应用，请重新打开本 App 并确认安装状态；
    - 看到 `WARNING no SensorManager method could be hooked` → 该 ROM 改动了 `SensorManager`，当前版本无法拦截；
    - 完全没有 NoShake 日志 → 模块没有注入到该进程（回到第 1、2 条）。
 10. 如果开启了严格模式，个别应用可能因拿不到传感器而崩溃或走异常分支，请先关闭严格模式再测。
@@ -267,9 +288,13 @@ LSPosed 管理器 →「模块」→「摇一摇克星」→「作用域」→ �
 
 不会常驻。模块代码只在被勾选的目标应用进程内运行，没有后台服务、没有定时轮询、没有网络请求；配置读取在传感器注册调用时触发，最多每 30 秒一次。被拦截的注册根本不会调用系统实现，因此也不会产生传感器采样开销。管理界面本身也不在后台运行。
 
+### 配置读不到会不会误拦所有应用？
+
+不会。两条配置读取通道都失败时模块按 **fail-open** 处理：本进程不拦截任何应用，只在 LSPosed 日志输出 `NoShake: configuration unavailable, motion sensors will NOT be blocked ...`。常见原因是本 App 被强制停止、被卸载或配置被清理；重新打开本 App 恢复配置后，最多 30 秒内重新读取（或重启目标应用立即生效）。
+
 ### 安全吗？会泄露隐私吗？
 
-- 本 App 未声明任何权限（包括 `INTERNET`），没有网络能力，也没有统计/广告/第三方 SDK；
+- 本 App 没有申请任何用户可见权限（无 `INTERNET` 等），没有网络能力，也没有统计/广告/第三方 SDK；合并后的 APK 仅包含 androidx 自动注入的签名级内部权限 `io.github.liuyunyang928.noshake.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`；
 - 配置只保存在本机的 `SharedPreferences` 中；
 - 为了让被 hook 进程读取配置，preferences 以 `MODE_WORLD_READABLE` 打开（仅在 LSPosed 启用时由框架接管为可读；未启用时回退私有模式）；
 - 为了跨 UID 传配置，App 导出了一个**只读** `ContentProvider`，任何应用都可以查询到「总开关、严格模式、被拦截的包名列表」——这是机制的必要条件，内容不包含个人信息；
@@ -324,6 +349,11 @@ LSPosed 管理器 →「模块」→「摇一摇克星」→「作用域」→ �
 
 界面只列出带启动器入口（`MAIN` / `LAUNCHER`）的应用，系统应用、没有桌面图标的应用可能不显示；本 App 自身也会被排除。这是为了保持列表可用性，也避免误操作系统关键应用。
 
+### 从 Actions 下载的 APK 和本地构建的 APK 能直接覆盖安装吗？
+
+- 都是 CI 构建（不同运行之间）：可以，CI 用固定的 debug keystore 签名；
+- CI 构建 ↔ 本地构建：不可以，签名不同，安装时会提示签名不一致，需要先卸载再安装（会清除本 App 的本地配置）。
+
 ## 已知限制
 
 - **必须 root + LSPosed**：v1 没有免 root 方案，也不支持其他 Xposed 实现（理论上兼容 Xposed API 82+ 的框架，但未验证）。
@@ -333,6 +363,7 @@ LSPosed 管理器 →「模块」→「摇一摇克星」→「作用域」→ �
 - **hook 只在进程启动时装载**：首次启用需重启/强制停止目标应用；配置变更最多 30 秒后对**新注册**生效，已有监听不会立即断开。
 - **系统应用与本 App 自身被跳过**：不会影响系统自动旋转等行为。
 - **拦截集合是最小集**：不拦光线、距离、磁力、显著运动、计步等；但依赖旋转矢量系列的指南针/AR/体感功能在被勾选的应用中可能受影响。
+- **未覆盖部分低频传感器类型**：未拦截 `TYPE_SIGNIFICANT_MOTION`(17)、`TYPE_POSE_6DOF`(28)、`TYPE_STATIONARY_DETECT`(29)、`TYPE_MOTION_DETECT`(30)、`TYPE_HEAD_TRACKER`(37)、`TYPE_ACCELEROMETER_LIMITED_AXES`(38) 等低频类型，以避免影响计步、AR、折叠屏等功能；这些类型通常不会用于常见摇一摇广告。
 - **严格模式（实验性）默认关闭**，开启后可能让个别未做空判断的应用异常；建议先对少量应用验证，遇到崩溃请关闭该开关。
 - **模块可被检测**：`ContentProvider` 与 world-readable 配置文件理论上可被目标应用探测，不影响拦截。
 - **兼容性以实际设备为准**：不同 ROM、不同 Android 版本、不同 LSPosed 版本可能有差异；hook 失败时会记录日志而不是让目标应用崩溃。本项目尚未进行大规模机型验证。
@@ -342,7 +373,7 @@ LSPosed 管理器 →「模块」→「摇一摇克星」→「作用域」→ �
 ## 隐私声明
 
 - **不收集、不上传任何数据**：没有埋点、没有统计、没有广告、没有第三方网络 SDK。
-- **不申请任何权限**：`AndroidManifest.xml` 中没有 `uses-permission` 声明（包括网络权限）。
+- **不申请任何用户可见权限**：没有 `INTERNET` 等用户可见权限（包括网络权限）；合并后的 APK 仅包含 androidx 自动注入的签名级内部权限 `io.github.liuyunyang928.noshake.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`。
 - **配置仅存本机**：总开关、严格模式、拦截列表保存在私有 `SharedPreferences`（为跨进程读取以 world-readable 模式打开，仅在 LSPosed 环境下生效）；不包含个人信息。
 - **导出的 ContentProvider 仅用于传配置**：只读，返回开关状态与包名列表，供已注入的目标进程跨 UID 读取配置；写操作全部拒绝。
 - **模块日志**：仅在 LSPosed 日志中输出诊断信息（首次拦截提示、hook 失败告警），不包含用户数据。
@@ -370,7 +401,7 @@ NoShake/
 │   ├── build.gradle.kts              # compileSdk 35 / minSdk 26 / targetSdk 34
 │   ├── proguard-rules.pro
 │   └── src/main/
-│       ├── AndroidManifest.xml       # 模块元数据、ConfigProvider、无权限声明
+│       ├── AndroidManifest.xml       # 模块元数据、ConfigProvider（无用户可见权限）
 │       ├── assets/
 │       │   └── xposed_init           # LSPosed 模块入口类名
 │       ├── java/io/github/liuyunyang928/noshake/
@@ -384,8 +415,8 @@ NoShake/
 │       │   │   └── AppRepository.kt  # 可启动应用扫描
 │       │   └── xposed/
 │       │       ├── ModuleEntry.kt    # IXposedHookLoadPackage 入口
-│       │       ├── SensorBlocker.kt  # SensorManager hook 实现
-│       │       └── ModuleConfig.kt   # 目标进程内的配置缓存（30 秒 TTL + 双通道兜底）
+│       │       ├── SensorBlocker.kt  # SensorManager / SensorDirectChannel hook 实现
+│       │       └── ModuleConfig.kt   # 目标进程内的配置缓存（30 秒 TTL + 双通道，fail-open）
 │       └── res/
 │           ├── drawable/             # 矢量图标
 │           ├── layout/               # activity_main.xml、item_app.xml
@@ -430,7 +461,7 @@ gradlew.bat assembleDebug
 产物路径：`app/build/outputs/apk/debug/app-debug.apk`。
 
 - `assembleRelease` 会生成未签名 APK（仓库未配置签名），如需正式分发请自行配置 `signingConfig`；
-- 不要提交 `local.properties`、签名文件或密钥，仓库已用 `.gitignore` 排除构建产物。
+- 不要提交 `local.properties`、签名文件或密钥：`.gitignore` 已排除构建产物，以及 `*.jks`、`*.keystore`、`keystore.properties`、`signing.properties` 等签名材料。
 
 ### GitHub Actions
 
@@ -438,7 +469,7 @@ gradlew.bat assembleDebug
 
 - 触发：推送到 `main`、Pull Request、手动 `workflow_dispatch`；
 - 运行环境：`ubuntu-latest`，Temurin JDK 17；
-- 步骤：checkout → 安装 JDK → 安装 Android SDK → 接受 licenses → 显式安装 `platform-tools`、`platforms;android-35`、`build-tools;35.0.0` → 执行 `./gradlew assembleDebug --no-daemon --stacktrace` → 上传 artifact；
+- 步骤：checkout → 安装 JDK → 缓存 debug keystore（`actions/cache`，保证不同 CI 构建之间可以覆盖升级）→ 使用 `ubuntu-latest` 预装的 Android SDK 接受 licenses 并安装 `platform-tools`、`platforms;android-35`、`build-tools;35.0.0` → 执行 `./gradlew assembleDebug --no-daemon --stacktrace` → 上传 artifact；
 - 产物：Actions 运行页面底部的 `NoShake-debug` artifact（zip，内含 `app-debug.apk`，保留 14 天）。
 
 [![Build APK](https://github.com/liuyunyang928/1/actions/workflows/build.yml/badge.svg)](https://github.com/liuyunyang928/1/actions/workflows/build.yml)

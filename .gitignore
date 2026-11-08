@@ -17,6 +17,12 @@ captures/
 *.ap_
 *.dex
 
+# Signing material (never commit keystores/credentials)
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+
 # OS
 .DS_Store
 Thumbs.db

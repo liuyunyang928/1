@@ -142,15 +142,15 @@ Shizuku 的定位是「让应用直接使用系统 API」：它通过 root 或 a
 只有把代码注入目标应用进程，才能做到「只拦某个应用」：
 
 1. **粒度正确**：LSPosed 按作用域注入，用户在 LSPosed 中勾选应用、再在管理界面中开关，天然就是按应用生效。
-2. **拦截点稳定**：`SensorManager` 的公开方法签名从 API 1 至今几乎未变（4 个 `SensorEventListener` 重载 + 2 个已废弃 `SensorListener` 位掩码重载 + `requestTriggerSensor`），hook 它不依赖任何私有字段/隐藏 API。
-3. **语义最干净**：对动作传感器直接让注册返回 `false`（文档定义的「传感器不可用」语义），不注册即不采样、不耗电，广告 SDK 收不到任何数据；相比「伪造数据」「在事件回调里丢包」，实现更简单、跨版本更稳。
+2. **拦截点稳定**：`SensorManager` 的公开方法签名从 API 1 至今几乎未变（4 个 `SensorEventListener` 重载 + 2 个已废弃 `SensorListener` 位掩码重载 + `requestTriggerSensor` + `createSensorDirectReport`），hook 它不依赖私有字段；若 OEM 在 `SystemSensorManager` 子类中覆写注册方法，再按类名反射补充 hook。
+3. **语义最干净**：对动作传感器直接让注册返回 `false`（文档定义的「传感器不可用」语义），`createSensorDirectReport` 则返回 `null`，不注册即不采样、不耗电，广告 SDK 收不到任何数据；相比「伪造数据」「在事件回调里丢包」，实现更简单、跨版本更稳。
 4. **代价明确**：需要 root + LSPosed；只覆盖 Java 层 `SensorManager`；NDK 通道、WebView 的 `devicemotion`/`deviceorientation` 事件不在覆盖范围内（见第 6.3 节）。
 
 ### 5.1 两种拦截策略对比（设计依据）
 
 | 策略 | 做法 | 优点 | 缺点 |
 | --- | --- | --- | --- |
-| **A. 拒绝注册**（本项目采用） | before-hook `registerListener` / `requestTriggerSensor`，命中动作传感器则 `setResult(false)` | 不碰私有 API；不采样不耗电；语义就是「传感器不可用」 | 少数不检查返回值的 SDK 会「一直等不到回调」；应用可感知传感器不可用 |
+| **A. 拒绝注册**（本项目采用） | before-hook `registerListener` / `requestTriggerSensor` / `createSensorDirectReport`，命中动作传感器则 `setResult(false)`（直连通道返回 `null`） | 不碰私有字段；不采样不耗电；语义就是「传感器不可用」 | 少数不检查返回值的 SDK 会「一直等不到回调」；应用可感知传感器不可用 |
 | B. 事件级丢包 | hook `SystemSensorManager$SensorEventQueue.dispatchSensorEvent` 丢弃事件 | 注册仍然「成功」，对必须注册成功的 SDK 更友好 | 需反射多个私有字段，系统升级易失效；仍在持续采样耗电 |
 
 本项目选择 A：hook 点少、完全基于公开 API，维护成本最低；B 只适合作为未来的「兼容模式」选项。`getDefaultSensor()` 返回 `null` 也不作为默认策略——AOSP 侧安全（原生实现会判空返回），但应用侧常在拿到 `Sensor` 后直接调 `sensor.getStringType()` 等方法，可能因此崩溃，所以只在「严格模式」下启用。
@@ -182,23 +182,27 @@ Shizuku 的定位是「让应用直接使用系统 API」：它通过 root 或 a
 
 **不拦截**：光线（5）、距离（8）、磁力（2/14）、显著运动（17）、计步（18/19）、心率（21/31）、气压/温度/湿度、铰链角（36）、佩戴检测（34）等。这样自动亮度、通话息屏、系统级计步/活动识别、折叠屏形态等功能不受影响。
 
+**未覆盖的低频类型**：`TYPE_SIGNIFICANT_MOTION`(17)、`TYPE_POSE_6DOF`(28)、`TYPE_STATIONARY_DETECT`(29)、`TYPE_MOTION_DETECT`(30)、`TYPE_HEAD_TRACKER`(37)、`TYPE_ACCELEROMETER_LIMITED_AXES`(38) 等不纳入拦截，以避免影响计步、AR、折叠屏等功能；这些类型通常不会用于摇一摇广告。若未来出现真实样本，可通过「按传感器类型细粒度开关」（路线图）扩展。
+
 ### 6.2 Hook 点
 
 | 方法 | 时机 | 动作 |
 | --- | --- | --- |
 | `registerListener(SensorEventListener, Sensor, ...)` 的 4 个重载 | before | 传感器类型命中拦截集合 → `setResult(false)` |
 | `registerListener(SensorListener, int[, int])` 的 2 个已废弃重载 | before | 位掩码包含方向/加速度位 → `setResult(false)`（容易遗漏的绕过面） |
-| `requestTriggerSensor(TriggerEventListener, Sensor)` | before | 同样按 `Sensor` 类型判定（当前拦截集合不含 `TYPE_SIGNIFICANT_MOTION`，该入口实际放行） |
+| `createSensorDirectReport(Sensor, int, int)` | before | `Sensor` 是第一个参数；命中拦截集合 → 返回 `null`，堵住 `SensorDirectChannel` 直连绕过 |
+| `requestTriggerSensor(TriggerEventListener, Sensor)` | before | 已 hook，但拦截集合不含 `TYPE_SIGNIFICANT_MOTION`(17)，因此该入口通常放行（保留计步/活动识别） |
 | `getDefaultSensor(...)` | before（严格模式） | 命中拦截集合 → 返回 `null` |
 | `getSensorList(...)` / `getDynamicSensorList(...)` | after（严格模式） | 从返回列表过滤拦截类型 |
 
-实现上使用 `XposedBridge.hookAllMethods(...)` 按方法名批量 hook，覆盖所有重载；安装完成后统计 hook 命中数量，若为 0 则写 `NoShake: WARNING ...` 日志（便于发现 ROM 改名/魔改 `SensorManager` 的情况）。
+实现上使用 `XposedBridge.hookAllMethods(...)` 按方法名批量 hook，覆盖所有重载；安装完成后统计 hook 命中数量，若为 0 则写 `NoShake: WARNING ...` 日志（便于发现 ROM 改名/魔改 `SensorManager` 的情况）。另外会尝试反射定位 `android.hardware.SystemSensorManager`，对 OEM 子类中覆写的 `registerListener` / `requestTriggerSensor` 声明补充 hook，防止虚调用绕过；类不存在或未覆写时静默跳过。
 
 ### 6.3 已知覆盖边界
 
 | 通道 | 是否覆盖 | 原因 |
 | --- | --- | --- |
-| Java `SensorManager`（常规应用、主流广告 SDK） | ✅ | 本模块的 hook 层面 |
+| Java `SensorManager`（常规应用、主流广告 SDK） | ✅ | 本模块的 hook 层面，含 OEM `SystemSensorManager` 子类覆写 |
+| `SensorDirectChannel`（`createSensorDirectReport`） | ✅ | Java 层直连通道，命中拦截集合时返回 `null` |
 | NDK `ASensorManager` | ❌ | 原生通道不经过 Java `SensorManager`，Java hook 无效 |
 | WebView 内 `devicemotion` / `deviceorientation` | ❌ | 由 Chromium/WebView 自行读取传感器，与本模块的 hook 无关 |
 | 系统应用 / 本模块自身进程 | ❌（主动跳过） | UID 判断：`android`、自身包名、system UID 一律跳过 |
@@ -208,7 +212,7 @@ Shizuku 的定位是「让应用直接使用系统 API」：它通过 root 或 a
 - **写入**：管理界面通过 `ConfigStore` 以 `MODE_WORLD_READABLE` 打开 `SharedPreferences`（`noshake_config`）。启用模块时 LSPosed 会拦截该模式、把文件变为被 hook 进程可读；未启用 LSPosed 时该调用抛 `SecurityException`，代码自动回退 `MODE_PRIVATE`。
 - **主读取通道**：被 hook 进程通过 `ContentProvider`（authority `io.github.liuyunyang928.noshake.config`，URI `content://.../config`）查询单行配置；`AndroidManifest.xml` 中的 `xposedsharedprefs=true` 同时启用 LSPosed 的 XSharedPreferences 桥。
 - **兜底通道**：Provider 不可用时，用反射构造 `XSharedPreferences` 直接读 prefs 文件。
-- **兜底失败**：两条通道都失败时 fail-closed（按「已启用」处理）。
+- **兜底失败（fail-open）**：两条通道都失败时**不拦截任何应用**，只在 LSPosed 日志输出 `NoShake: configuration unavailable, motion sensors will NOT be blocked ...`（避免把 LSPosed 作用域内未勾选的应用一起拦住）。
 - **缓存**：配置在目标进程内缓存 30 秒；hook 只在进程启动时装载，因此**首次把某应用纳入拦截后需要重启/强制停止该应用**，配置变更则在最多 30 秒内对新注册生效。
 
 ## 7. 待真机验证清单

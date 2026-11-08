@@ -69,9 +69,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // 用户可能刚从 LSPosed 管理器或系统安装界面返回，回到前台时刷新外部状态。
+        // 用户可能刚从 LSPosed 管理器或系统安装界面返回，回到前台时刷新外部状态与配置。
         updateLsposedStatus()
         updateBlockedSummary()
+        if (appsLoaded) {
+            renderAppList()
+        }
     }
 
     // ------------------------------------------------------------------ 初始化
@@ -104,11 +107,14 @@ class MainActivity : AppCompatActivity() {
         binding.switchMaster.isChecked = configStore.masterEnabled
         binding.switchMaster.setOnCheckedChangeListener { _, isChecked ->
             configStore.masterEnabled = isChecked
+            // 总开关关闭时严格模式无意义，禁用入口避免误解。
+            binding.switchStrictMode.isEnabled = isChecked
         }
 
         // 严格模式（实验性）：仅写入配置，不影响列表排序/筛选，无需刷新列表。
         binding.switchStrictMode.setOnCheckedChangeListener(null)
         binding.switchStrictMode.isChecked = configStore.strictMode
+        binding.switchStrictMode.isEnabled = binding.switchMaster.isChecked
         binding.switchStrictMode.setOnCheckedChangeListener { _, isChecked ->
             configStore.strictMode = isChecked
         }

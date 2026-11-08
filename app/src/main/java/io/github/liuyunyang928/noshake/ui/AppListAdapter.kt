@@ -68,11 +68,10 @@ class AppListAdapter(
             // 复用 ViewHolder 时必须先移除旧监听，否则 setChecked 会回调到上一行的应用。
             binding.appSwitch.setOnCheckedChangeListener(null)
             binding.appSwitch.isChecked = entry.blocked
-            binding.appSwitch.setOnCheckedChangeListener { _, isChecked ->
-                val item = currentEntry ?: return@setOnCheckedChangeListener
-                if (item.blocked != isChecked) {
-                    onToggle(item)
-                }
+            binding.appSwitch.setOnCheckedChangeListener { _, _ ->
+                // 状态以 Activity 里的 ConfigStore 为准，这里不比较（可能已过期的）
+                // entry.blocked，否则快速连点会吞掉一次切换并造成开关与配置短暂不同步。
+                currentEntry?.let(onToggle)
             }
         }
     }

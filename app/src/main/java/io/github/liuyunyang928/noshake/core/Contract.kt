@@ -13,8 +13,11 @@ object Contract {
     /** Authority of [ConfigProvider]; hooked processes read the configuration from it. */
     const val CONFIG_AUTHORITY = "io.github.liuyunyang928.noshake.config"
 
+    /** Path served by [ConfigProvider]; other paths return an empty cursor. */
+    const val CONFIG_PATH = "/config"
+
     /** URI queried by the module to obtain the configuration snapshot. */
-    const val CONFIG_URI = "content://$CONFIG_AUTHORITY/config"
+    const val CONFIG_URI = "content://$CONFIG_AUTHORITY$CONFIG_PATH"
 
     /** Column indexes of the one-row configuration cursor. */
     const val COLUMN_MASTER = 0
